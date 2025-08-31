@@ -1,0 +1,156 @@
+name: Run K6 Load Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      choose_scenario:
+        description: 'Choose the scenario'
+        required: true
+        default: 'constant_arrival_rate'
+        type: choice
+        options:
+          - constant_arrival_rate
+          - ramping_arrival_rate
+      choose_sub_scenario:
+        description: 'Choose the sub for the scenario'
+        required: true
+        default: 'N/A'
+        type: choice
+        options: 
+          - N/A
+          - steady_smoke_test
+          - steady_stability_test
+          - sustained_throughput_test
+          - stress
+          - spike
+      choose_env:
+        description: 'Domain'
+        required: true
+        default: 'ebs_staging'
+        type: choice
+        options:
+          - ebs_staging
+          - ebs_production
+          - eks_staging
+      request_method:
+        description: 'Request Type'
+        required: true
+        default: Get
+        type: choice
+        options:
+          - Get
+          - Post
+      perform_login:
+        description: 'Perform login before running the test'
+        required: true
+        default: true
+        type: boolean
+      login_mode:
+        description: 'Login in for each iteration?'
+        required: false
+        default: false
+        type: boolean
+      api_endpoint:
+        description: 'API endpoint to test (optional).'
+        required: false
+        default: '/restAPI/endpoint'
+        type: string
+      payload:
+        description: 'Payload for the request (optional).'
+        required: false
+        default: '{}'
+        type: string
+      payload_type:
+        description: 'Payload Type'
+        required: true
+        default: 'application/json'
+        type: choice
+        options:
+          - application/json
+          - application/x-www-form-urlencoded
+
+jobs:
+  k6-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        path: .
+
+    - name: Install k6 manually
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gnupg software-properties-common
+        sudo curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install -y k6
+        k6 version
+
+    - name: Run k6 load test
+      run: |
+        k6 run src/load_test.js \
+          --env choose_env=${{ github.event.inputs.choose_env }} \
+          --env PERFORM_LOGIN=${{ github.event.inputs.perform_login }} \
+          --env API_ENDPOINT=${{ github.event.inputs.api_endpoint }} \
+          --env PAYLOAD_TYPE=${{ github.event.inputs.payload_type }} \
+          --env choose_scenario=${{ github.event.inputs.choose_scenario }} \
+          --env choose_sub_scenario=${{ github.event.inputs.choose_sub_scenario }} \
+          --env USER_EMAIL=test.user@example.com \
+          --env USER_PASSWORD=Password123! \
+          --env LOGIN_MODE=${{ github.event.inputs.login_mode}} \
+          --env METHOD=${{ github.event.inputs.request_method}} \
+          --env PAYLOAD="${{ github.event.inputs.payload }}" \
+          --summary-trend-stats="min,avg,med,p(90),p(95),p(99),max" \
+          --summary-export=src/summary.json \
+          --out json=src/results.json \
+      working-directory: .
+      continue-on-error: true  # Allow continuation despite failure
+
+    - name: Debug Directory Contents
+      run: |
+        echo "Listing src:"
+        ls -l src/
+        echo "Listing src/${{ github.event.inputs.choose_env }}:"
+        ls -l src/${{ github.event.inputs.choose_env }} || echo "Directory not found"
+      working-directory: .
+
+    - name: Ensure Output Directory
+      run: |
+        mkdir -p src/${{ github.event.inputs.choose_env }}
+        echo "Created output directory: src/${{ github.event.inputs.choose_env }}"
+      working-directory: .
+
+    - name: Generate Markdown Report from summary.json
+      run: |
+        node src/K6_report.js
+      working-directory: .
+
+    - name: Fail workflow on threshold breach
+      run: |
+        if grep -q '"thresholds":.*false' src/summary.json; then
+          echo "❌ One or more thresholds failed."
+          exit 1
+        fi
+      working-directory: .
+
+    - name: Upload k6 test results as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: k6-test-results
+        path: |
+          src/summary.json
+          src/results.json
+
+    - name: Upload Markdown Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: k6_report
+        path: src/${{ github.event.inputs.choose_env }}/*.md
+
+    - name: View Markdown Report
+      run: |
+        cat src/${{ github.event.inputs.choose_env }}/*.md || echo "No Markdown report found"
+      working-directory: .
